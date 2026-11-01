@@ -2249,78 +2249,30 @@ describe('evaluator', () => {
       expect(result.testIndices).toEqual([1, 2, 3]);
     });
 
-    it('treats %, _, and backslash in metadata contains filters as literal text', async () => {
-      const eval_ = await EvalFactory.create(createPassFailOptions(2));
-
-      const db = await getDb();
-      // JSON needs a doubled backslash, so the stored value is the literal path\name.
-      // Row 1 is the wildcard false-positive: gptX4, 1000, and pathname.
-      await db.run(
-        `UPDATE eval_results SET metadata = json('{"model":"gpt_4","discount":"100%","path":"path\\\\name"}') WHERE eval_id = '${eval_.id}' AND test_idx = 0`,
-      );
-      await db.run(
-        `UPDATE eval_results SET metadata = json('{"model":"gptX4","discount":"1000","path":"pathname"}') WHERE eval_id = '${eval_.id}' AND test_idx = 1`,
-      );
-
-      for (const [operator, field, value, expected] of [
-        ['contains', 'model', 'gpt_4', [0]],
-        ['contains', 'discount', '100%', [0]],
-        ['contains', 'path', 'path\\name', [0]],
-        ['not_contains', 'model', 'gpt_4', [1]],
-        ['not_contains', 'discount', '100%', [1]],
-        ['not_contains', 'path', 'path\\name', [1]],
-      ] as const) {
-        const filters = [
-          JSON.stringify({ logicOperator: 'and', type: 'metadata', operator, field, value }),
-        ];
-        const label = `${field} ${operator} ${value}`;
-
-        const { testIndices } = await (eval_ as any).queryTestIndices({ filters });
-        expect(testIndices, label).toEqual(expected);
-
-        const page = await eval_.getTablePage({ filters });
-        expect(
-          page.body.map((row) => row.testIdx),
-          label,
-        ).toEqual(expected);
+    it('matches literal metadata substrings with ASCII case folding', async () => {
+      const eval_ = await EvalFactory.create({ numResults: 0 });
+      const rows = [
+        { tag: 'gpt_4 100% marker\\%_ tail\\ x\0z' },
+        { tag: 'gptX4 1000 marker\\AB tail x' },
+        { tag: null },
+        {},
+      ];
+      for (const [testIdx, metadata] of rows.entries()) {
+        await eval_.addResult(createEvaluateResult({ testIdx, metadata }));
       }
-    });
 
-    it('keeps ASCII case-insensitive LIKE matching for metadata contains filters', async () => {
-      const eval_ = await EvalFactory.create(createPassFailOptions(2));
-
-      const db = await getDb();
-      await db.run(
-        `UPDATE eval_results SET metadata = json('{"model":"gpt_4"}') WHERE eval_id = '${eval_.id}' AND test_idx = 0`,
-      );
-      await db.run(
-        `UPDATE eval_results SET metadata = json('{"model":"other"}') WHERE eval_id = '${eval_.id}' AND test_idx = 1`,
-      );
-
-      // ESCAPE '\' must not turn SQLite LIKE case-sensitive for ASCII letters.
-      for (const [operator, expected] of [
-        ['contains', [0]],
-        ['not_contains', [1]],
-      ] as const) {
-        const filters = [
-          JSON.stringify({
-            logicOperator: 'and',
-            type: 'metadata',
-            operator,
-            field: 'model',
-            value: 'GPT_4',
-          }),
-        ];
-        const label = `model ${operator} GPT_4`;
-
-        const { testIndices } = await (eval_ as any).queryTestIndices({ filters });
-        expect(testIndices, label).toEqual(expected);
-
-        const page = await eval_.getTablePage({ filters });
-        expect(
-          page.body.map((row) => row.testIdx),
-          label,
-        ).toEqual(expected);
+      for (const value of ['GPT_4', '100%', 'marker\\%_', 'tail\\', 'X\0Z']) {
+        for (const [operator, expected] of [
+          ['contains', [0]],
+          ['not_contains', [1, 2, 3]],
+        ] as const) {
+          const filter = JSON.stringify({ type: 'metadata', operator, field: 'tag', value });
+          const page = await eval_.getTablePage({ filters: [filter] });
+          expect(
+            page.body.map((row) => row.testIdx),
+            filter,
+          ).toEqual(expected);
+        }
       }
     });
 
